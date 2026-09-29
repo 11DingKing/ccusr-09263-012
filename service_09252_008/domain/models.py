@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum, IntEnum
@@ -657,4 +658,107 @@ class DomainEvent:
             booking_id=data.get("booking_id"),
             payload=dict(data.get("payload", {})),
             created_at=dt_from_str(data["created_at"]),
+        )
+
+
+# ---------------------------------------------------------------------------
+# 机构月度名额配额
+# ---------------------------------------------------------------------------
+
+#: 月份键格式：``YYYY-MM``
+MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def month_key_from_datetime(value: datetime) -> str:
+    """把带时区时间归入其 UTC 所在月份的 ``YYYY-MM`` 键。"""
+    if value.tzinfo is None:
+        raise ValueError("datetime must be timezone-aware")
+    utc = value.astimezone(timezone.utc)
+    return f"{utc.year:04d}-{utc.month:02d}"
+
+
+def validate_month_key(month: str) -> str:
+    """校验 ``YYYY-MM`` 月份键并返回规范化结果。"""
+    if not isinstance(month, str) or not MONTH_PATTERN.match(month.strip()):
+        raise ValueError("month must use the YYYY-MM format")
+    return month.strip()
+
+
+@dataclass
+class Quota:
+    """机构月度名额配额：按月份与机构分别计算。
+
+    ``total`` 为当月名额上限，``used`` 为当前已领取（占用）数，
+    ``remaining`` 即剩余名额；领取与释放在单事务内完成，杜绝超卖。
+    """
+
+    quota_id: str
+    institution: str
+    month: str  # YYYY-MM（UTC）
+    total: int
+    used: int = 0
+
+    @property
+    def remaining(self) -> int:
+        return self.total - self.used
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "quota_id": self.quota_id,
+            "institution": self.institution,
+            "month": self.month,
+            "total": self.total,
+            "used": self.used,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Quota":
+        return cls(
+            quota_id=data["quota_id"],
+            institution=data["institution"],
+            month=validate_month_key(data["month"]),
+            total=int(data["total"]),
+            used=int(data.get("used", 0)),
+        )
+
+
+@dataclass
+class QuotaClaim:
+    """名额领取记录：候补者同样占位，释放后按原排序补位。"""
+
+    claim_id: str
+    quota_id: str
+    institution: str
+    month: str
+    applicant_id: str  # 领取方标识（候补者按该标识区分先后）
+    status: str  # WAITING / HELD / RELEASED
+    position: int  # 申请先后序号（从 1 开始），释放后保持原排序
+    created_at: datetime
+    updated_at: datetime
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "claim_id": self.claim_id,
+            "quota_id": self.quota_id,
+            "institution": self.institution,
+            "month": self.month,
+            "applicant_id": self.applicant_id,
+            "status": self.status,
+            "position": self.position,
+            "created_at": dt_to_str(self.created_at),
+            "updated_at": dt_to_str(self.updated_at),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "QuotaClaim":
+        return cls(
+            claim_id=data["claim_id"],
+            quota_id=data["quota_id"],
+            institution=data["institution"],
+            month=validate_month_key(data["month"]),
+            applicant_id=data["applicant_id"],
+            status=data["status"],
+            position=int(data["position"]),
+            created_at=dt_from_str(data["created_at"]),
+            updated_at=dt_from_str(data["updated_at"]),
         )

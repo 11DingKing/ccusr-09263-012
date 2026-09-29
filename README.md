@@ -13,7 +13,8 @@ service_09252_008/
 ├── application/       # 应用服务层
 │   ├── ports.py       #   可替换端口：Clock / IdGenerator（测试注入手动时钟与序列 ID）
 │   ├── catalog_service.py  # 目录登记与校验
-│   └── booking_service.py  # 预约状态机：申请/报价/锁定/改期/发运/到货/签到/结算/取消/恢复
+│   ├── booking_service.py  # 预约状态机：申请/报价/锁定/改期/发运/到货/签到/结算/取消/恢复
+│   └── quota_service.py    # 机构月度名额配额：设定/领取/释放/候补补位（按月+机构计算）
 ├── persistence/       # 持久化层
 │   ├── store.py       #   存储端口 + 内存实现（快照回滚）
 │   └── sqlite_store.py     # SQLite 实现（BEGIN IMMEDIATE，重启可恢复）
@@ -36,6 +37,11 @@ service_09252_008/
   （`non_returnable_leftover`），课中损坏记 `damaged_in_use`。
 - **超时恢复**：过期锁定释放库存并晋级候补，过期报价退回待报价；
   服务启动时与 `POST /admin/recover` 均可触发。
+- **机构月度名额配额**：配额按月份（UTC，`YYYY-MM`）与机构分别计算。
+  领取在单事务内“读-判-写”，`used` 扣减与领取记录原子提交，
+  SQLite 后端以 `BEGIN IMMEDIATE` 串行化写者，并发领取不会超卖；
+  满额后新领取进入候补（保留申请先后 `position`），名额释放后候补者按原排序补位。
+  领取/查询接口均返回 `remaining` 剩余名额。
 - **时间**：内部一律 UTC；输入接受任意 ISO-8601 偏移（拒绝朴素时间）。
 
 ## 运行
@@ -62,6 +68,12 @@ python3 -m service_09252_008 --host 127.0.0.1 --port 8080
 | POST | `/bookings/{id}/settle` | 结算（`actual_attendance`、可选 `damaged`） |
 | POST | `/bookings/{id}/cancel` | 取消（释放候补、按规则记损耗） |
 | POST | `/admin/recover` | 恢复超时任务 |
+| POST | `/quotas` | 设定/调整某机构某月名额上限 |
+| POST | `/quota-claims` | 领取一个名额（满额入候补，返回含 `remaining`） |
+| POST | `/quota-claims/{id}/release` | 释放名额（占用名额释放后候补按原排序补位） |
+| GET  | `/quotas/{month}` | 机构负责人按月查看所有机构配额 |
+| GET  | `/quotas/{month}/{institution}` | 查看某机构当月配额（含剩余名额） |
+| GET  | `/quota-claims/{month}/{institution}` | 查看某机构当月全部领取/候补记录 |
 | GET  | `/bookings/{id}` `/health` | 查询 |
 
 幂等键经请求头 `Idempotency-Key` 或载荷字段 `idempotency_key` 传入；
@@ -75,7 +87,8 @@ python3 -m unittest discover -s tests -v
 
 覆盖：主流程端到端、前置培训/容量/安全/互斥/运输周期规则、跨时区、
 幂等重放、并发锁定（内存与 SQLite 双后端）、重启后超时恢复、
-部分到货与在途损耗、取消释放候补与损耗记录、HTTP 接口边界。
+部分到货与在途损耗、取消释放候补与损耗记录、HTTP 接口边界、
+机构月度名额配额（按月/机构计算、释放按原排序补位、两个请求并发争抢最后一个名额不超卖）。
 
 ## 编译检查
 

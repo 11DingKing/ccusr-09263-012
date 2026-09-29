@@ -9,6 +9,7 @@ import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
+from urllib.parse import unquote
 
 from ..application.booking_service import BookingService
 from ..application.catalog_service import (
@@ -19,6 +20,7 @@ from ..application.catalog_service import (
     COLLECTION_WINDOWS,
     CatalogService,
 )
+from ..application.quota_service import QuotaService
 from ..domain.errors import (
     BusinessRuleError,
     ConflictError,
@@ -61,7 +63,7 @@ class _Router:
         return None
 
 
-def build_router(catalog: CatalogService, bookings: BookingService) -> _Router:
+def build_router(catalog: CatalogService, bookings: BookingService, quotas: QuotaService) -> _Router:
     router = _Router()
 
     def with_idempotency_key(payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
@@ -138,6 +140,36 @@ def build_router(catalog: CatalogService, bookings: BookingService) -> _Router:
         lambda body, hdr: bookings.cancel(hdr["__path__"]["booking_id"], with_idempotency_key(body, hdr)),
     )
     router.add("POST", "/admin/recover", lambda body, hdr: bookings.recover())
+
+    # 机构月度名额配额
+    router.add("POST", "/quotas", lambda body, hdr: quotas.set_quota(body))
+    router.add(
+        "GET",
+        "/quotas/{month}",
+        lambda body, hdr: quotas.quota_for_month(hdr["__path__"]["month"]),
+    )
+    router.add(
+        "GET",
+        "/quotas/{month}/{institution}",
+        lambda body, hdr: quotas.get_quota(hdr["__path__"]["institution"], hdr["__path__"]["month"]),
+    )
+    router.add(
+        "GET",
+        "/quota-claims/id/{claim_id}",
+        lambda body, hdr: quotas.get_claim(hdr["__path__"]["claim_id"]),
+    )
+    router.add(
+        "GET",
+        "/quota-claims/{month}/{institution}",
+        lambda body, hdr: quotas.list_claims(hdr["__path__"]["institution"], hdr["__path__"]["month"]),
+    )
+    router.add("POST", "/quota-claims", lambda body, hdr: quotas.claim(body))
+    router.add(
+        "POST",
+        "/quota-claims/{claim_id}/release",
+        lambda body, hdr: quotas.release(hdr["__path__"]["claim_id"], body),
+    )
+
     router.add("GET", "/health", lambda body, hdr: {"status": "ok"})
     return router
 
@@ -159,7 +191,7 @@ def make_handler_class(router: _Router) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(body)
 
         def _dispatch(self, method: str) -> None:
-            path = self.path.split("?", 1)[0].rstrip("/") or "/"
+            path = unquote(self.path.split("?", 1)[0]).rstrip("/") or "/"
             matched = router.match(method, path)
             if matched is None:
                 self._send_json(404, {"error": "not_found", "message": f"no route for {method} {path}"})
@@ -200,9 +232,10 @@ def create_server(
     port: int,
     catalog: CatalogService,
     bookings: BookingService,
+    quotas: QuotaService,
 ) -> ThreadingHTTPServer:
     """构建线程化 HTTP 服务（守护线程，随进程退出）。"""
-    router = build_router(catalog, bookings)
+    router = build_router(catalog, bookings, quotas)
     server = ThreadingHTTPServer((host, port), make_handler_class(router))
     server.daemon_threads = True
     return server
